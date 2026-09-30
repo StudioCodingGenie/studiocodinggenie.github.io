@@ -1,0 +1,1363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OrderRail - Multi-Order Floor Engine</title>
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="OrderRail">
+    <meta name="theme-color" content="#020617">
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="icon-192.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans min-h-screen p-4 md:p-6">
+
+    <div class="max-w-7xl mx-auto">
+
+        <!-- ============ ROLE GATE (per-device, locked until admin resets) ============ -->
+        <div id="roleGate" class="max-w-md mx-auto mt-10 md:mt-16 text-center">
+            <h1 class="text-2xl font-bold text-emerald-400 mb-1">OrderRail</h1>
+            <p class="text-xs text-slate-400 mb-6 font-mono">Who's using this device?</p>
+            <div id="roleNotice" class="hidden text-left text-xs text-rose-300 bg-rose-950/40 border border-rose-800 rounded p-3 mb-4"></div>
+
+            <button data-role="waiter" class="role-btn w-full text-left bg-slate-900 hover:bg-slate-800 border border-slate-800 border-l-4 border-l-emerald-500 rounded-lg p-4 mb-3 transition">
+                <span class="block font-bold text-white">Waiter</span>
+                <span class="block text-xs text-slate-400 mt-1">Take orders, mark your tables served</span>
+            </button>
+            <button data-role="kitchen" class="role-btn w-full text-left bg-slate-900 hover:bg-slate-800 border border-slate-800 border-l-4 border-l-amber-500 rounded-lg p-4 mb-3 transition">
+                <span class="block font-bold text-white">Kitchen</span>
+                <span class="block text-xs text-slate-400 mt-1">See every incoming ticket, update status</span>
+            </button>
+            <button data-role="biller" class="role-btn w-full text-left bg-slate-900 hover:bg-slate-800 border border-slate-800 border-l-4 border-l-cyan-500 rounded-lg p-4 mb-3 transition">
+                <span class="block font-bold text-white">Biller</span>
+                <span class="block text-xs text-slate-400 mt-1">Close out served tables, take payment</span>
+            </button>
+
+            <p class="text-[10px] text-slate-500 my-4 font-mono">Once picked, a role stays locked on this device — only an admin can reset it.</p>
+            <button id="adminAccessLink" class="text-xs text-slate-500 underline">Admin access</button>
+        </div>
+
+        <!-- ============ NAME STEP (waiter, kitchen, or biller) ============ -->
+        <div id="nameStep" class="hidden max-w-sm mx-auto mt-16 text-left">
+            <h1 class="text-xl font-bold text-white mb-1">Your name</h1>
+            <p id="nameStepSub" class="text-xs text-slate-400 font-mono mb-4">&mdash;</p>
+            <input type="text" id="waiterNameInput" placeholder="e.g. Rahul" class="w-full bg-slate-900 border border-slate-800 rounded p-3 text-white text-sm mb-3">
+            <button id="nameContinueBtn" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-3 rounded-lg">Continue</button>
+            <button id="nameBackBtn" class="text-xs text-slate-500 underline mt-3">&larr; back</button>
+        </div>
+
+        <!-- ============ MAIN APP ============ -->
+        <div id="app" class="hidden">
+            <header class="flex flex-col md:flex-row justify-between items-center mb-6 bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-xl gap-4">
+                <div>
+                    <h1 id="viewTitle" class="text-2xl font-bold text-emerald-400">OrderRail</h1>
+                    <p id="viewSub" class="text-xs text-slate-400 font-mono">&mdash;</p>
+                </div>
+                <div id="live-clock" class="text-amber-400 font-mono text-xs bg-slate-950 px-3 py-2 rounded border border-slate-800 whitespace-nowrap"></div>
+                <button id="switchRoleBtn" class="hidden text-xs text-slate-400 underline whitespace-nowrap">log out</button>
+            </header>
+
+            <div id="save-warning" class="hidden fixed bottom-0 left-0 right-0 bg-rose-900 text-rose-100 text-xs font-mono text-center py-2 z-20"></div>
+
+            <main id="bodyWrap"></main>
+        </div>
+
+    </div>
+
+<script>
+/* =================================================================
+   OrderRail — synced multi-device backbone (shared storage + device
+   registry + role locking) wearing the OrderRail Enterprise UI:
+   dark card layout, live clock, per-order timestamp fields, and a
+   central admin audit table with exact stamps + stage delays.
+   ================================================================= */
+
+/* =================================================================
+   Firebase config — paste your project's values here (see
+   FIREBASE-SETUP.md). Shared/global data (orders, table sessions,
+   device registry) goes to Firebase so every device sees the same
+   live data. Per-device data (this device's own identity) still
+   stays in plain browser localStorage — it was never meant to sync.
+   ================================================================= */
+const firebaseConfig = {
+  apiKey: "AIzaSyDKwikB02wp7YS57o8HpTRsMizH38kV_jw",
+  authDomain: "order-rail-9ca84.firebaseapp.com",
+  databaseURL: "https://order-rail-9ca84-default-rtdb.firebaseio.com",
+  projectId: "order-rail-9ca84",
+  storageBucket: "order-rail-9ca84.firebasestorage.app",
+  messagingSenderId: "520951102153",
+  appId: "1:520951102153:web:18c061428cde15a950eb18",
+  measurementId: "G-L0GP93B6HV"
+};
+const FIREBASE_CONFIGURED = !firebaseConfig.apiKey.startsWith('PASTE_');
+let db = null;
+if (FIREBASE_CONFIGURED) {
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.database();
+}
+
+// window.storage is Claude's own storage API — it only exists inside
+// Claude's preview, not on a hosted site like Netlify. This shim
+// keeps the exact same get/set/delete/list interface everything else
+// in this file already calls, but now shared=true actually reaches
+// Firebase (real cross-device sync) instead of quietly staying local.
+// shared=false (per-device identity) still uses localStorage — that
+// data was always meant to be device-only, so nothing changes there.
+if (!window.storage) {
+  window.storage = {
+    async get(key, shared) {
+      if (shared && db) {
+        const snap = await db.ref('kv/' + key).once('value');
+        const val = snap.val();
+        if (val === null || val === undefined) throw new Error('key not found: ' + key);
+        return { key, value: val, shared: true };
+      }
+      const raw = localStorage.getItem('orderrail:' + key);
+      if (raw === null) throw new Error('key not found: ' + key);
+      return { key, value: raw, shared: !!shared };
+    },
+        async set(key, value, shared) {
+      if (shared && db) {
+        await db.ref('kv/' + key).set(value);
+        return { key, value, shared: true };
+      }
+      localStorage.setItem('orderrail:' + key, value);
+      return { key, value, shared: !!shared };
+    },
+        async delete(key, shared) {
+      if (shared && db) {
+        await db.ref('kv/' + key).remove();
+        return { key, deleted: true, shared: true };
+      }
+      localStorage.removeItem('orderrail:' + key);
+      return { key, deleted: true, shared: !!shared };
+    },
+        async list(prefix, shared) {
+      if (shared && db) {
+        const snap = await db.ref('kv').once('value');
+        const val = snap.val() || {};
+        const keys = Object.keys(val).filter(k => !prefix || k.startsWith(prefix));
+        return { keys, prefix, shared: true };
+      }
+      const keys = [];
+      const p = 'orderrail:' + (prefix || '');
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(p)) keys.push(k.slice('orderrail:'.length));
+      }
+      return { keys, prefix, shared: !!shared };
+    }
+  };
+}
+
+const STATUS_LABELS = { Draft: 'Draft', Placed: 'Placed', Preparing: 'Preparing', Ready: 'Ready', Served: 'Served', Paid: 'Paid' };
+const STATUS_COLOR = { Draft: 'text-slate-400', Placed: 'text-emerald-400', Preparing: 'text-amber-400', Ready: 'text-cyan-400', Served: 'text-blue-400', Paid: 'text-slate-400' };
+const STORAGE_KEY = 'orderrail_orders';
+const TABLE_KEY = 'orderrail_table_sessions'; // Engaged/Available floor status — kept separate from orders on purpose
+const DEVICE_ID_KEY = 'orderrail_device_id';
+const IDENTITY_KEY = 'orderrail_identity';
+const REGISTRY_KEY = 'orderrail_device_registry';
+const POLL_MS = 4000;
+const ADMIN_ACCESS_CODE = 'ADMIN-2580';
+
+let orders = [];
+let tableSessions = []; // { id, table, waiter, engagedAt, freedAt, freedBy }
+let identity = null;      // { deviceId, role, name }
+let deviceId = null;
+let deviceRegistry = {};  // shared: { [deviceId]: {deviceId, role, name, lastSeenAt, revoked} }
+let pendingRole = null;   // role awaiting a name on the name step
+let lastOrdersSnapshot = null; // serialized copy of last-rendered orders, to skip no-op re-renders on poll
+let lastTableSnapshot = null;  // same idea, for table sessions
+
+const roleGate = document.getElementById('roleGate');
+const roleNotice = document.getElementById('roleNotice');
+const nameStep = document.getElementById('nameStep');
+const app = document.getElementById('app');
+const bodyWrap = document.getElementById('bodyWrap');
+const viewTitle = document.getElementById('viewTitle');
+const viewSub = document.getElementById('viewSub');
+const switchRoleBtn = document.getElementById('switchRoleBtn');
+const warnBar = document.getElementById('save-warning');
+
+/* ---------------- Live clock (matches OrderRail Enterprise format) ---------------- */
+setInterval(() => {
+    const now = new Date();
+    document.getElementById('live-clock').innerText =
+        `System Clock: ${now.toLocaleTimeString('en-GB')} | ${now.toLocaleDateString('en-GB')}`;
+}, 1000);
+
+/* ---------------- Device identity / registry ---------------- */
+
+async function getOrCreateDeviceId() {
+    if (deviceId) return deviceId;
+    try {
+        const res = await window.storage.get(DEVICE_ID_KEY, false);
+        if (res && res.value) { deviceId = res.value; return deviceId; }
+    } catch (e) { /* not set yet */ }
+    deviceId = 'dev_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+    try { await window.storage.set(DEVICE_ID_KEY, deviceId, false); } catch (e) { /* non-fatal */ }
+    return deviceId;
+}
+
+async function loadIdentity() {
+    try {
+        const res = await window.storage.get(IDENTITY_KEY, false);
+        identity = res && res.value ? JSON.parse(res.value) : null;
+    } catch (e) { identity = null; }
+}
+
+async function saveIdentity() {
+    try { await window.storage.set(IDENTITY_KEY, JSON.stringify(identity), false); } catch (e) { /* non-fatal */ }
+}
+
+function showRoleNotice(msg) {
+    roleNotice.textContent = msg;
+    roleNotice.classList.remove('hidden');
+}
+function clearRoleNotice() {
+    roleNotice.classList.add('hidden');
+    roleNotice.textContent = '';
+}
+
+async function fetchRegistry() {
+    try {
+        const res = await window.storage.get(REGISTRY_KEY, true);
+        deviceRegistry = res && res.value ? JSON.parse(res.value) : {};
+    } catch (e) { /* keep last known copy on failure */ }
+    return deviceRegistry;
+}
+
+async function registerDevice() {
+    await fetchRegistry();
+    deviceRegistry[identity.deviceId] = { deviceId: identity.deviceId, role: identity.role, name: identity.name, lastSeenAt: Date.now(), revoked: false };
+    try { await window.storage.set(REGISTRY_KEY, JSON.stringify(deviceRegistry), true); } catch (e) { /* non-fatal */ }
+}
+
+// Heartbeat: refresh this device's lastSeenAt so Admin sees it as
+// online, and check whether an admin remotely reset this device's role.
+async function heartbeatAndCheckRevoked() {
+    await fetchRegistry();
+    if (!identity) return;
+
+    const entry = deviceRegistry[identity.deviceId];
+    if (entry && entry.revoked) {
+        await handleRevoked();
+        return;
+    }
+    const stale = !entry || entry.role !== identity.role || entry.name !== identity.name || (Date.now() - (entry.lastSeenAt || 0) > 10000);
+    if (stale) {
+        deviceRegistry[identity.deviceId] = { deviceId: identity.deviceId, role: identity.role, name: identity.name, lastSeenAt: Date.now(), revoked: false };
+        try { await window.storage.set(REGISTRY_KEY, JSON.stringify(deviceRegistry), true); } catch (e) { /* non-fatal */ }
+    }
+}
+
+async function handleRevoked() {
+    identity = null;
+    await saveIdentity();
+    stopPolling();
+    app.classList.add('hidden');
+    nameStep.classList.add('hidden');
+    roleGate.classList.remove('hidden');
+    showRoleNotice("This device's role was reset by an admin. Pick a role to continue.");
+}
+
+async function revokeDevice(dId) {
+    await fetchRegistry();
+    if (deviceRegistry[dId]) deviceRegistry[dId].revoked = true;
+    try {
+        await window.storage.set(REGISTRY_KEY, JSON.stringify(deviceRegistry), true);
+        render();
+    } catch (e) {
+        showWarning("Couldn't reach the device registry — try again.");
+    }
+}
+
+/* ---------------- Role selection ---------------- */
+
+const ROLE_LABELS = { waiter: 'Waiter', kitchen: 'Kitchen', biller: 'Biller' };
+
+document.querySelectorAll('.role-btn').forEach(btn => {
+    btn.onclick = () => {
+        pendingRole = btn.dataset.role;
+        document.getElementById('nameStepSub').textContent = `Signing in as ${ROLE_LABELS[pendingRole]} — each person gets their own name on their own device.`;
+        document.getElementById('waiterNameInput').value = '';
+        roleGate.classList.add('hidden');
+        nameStep.classList.remove('hidden');
+        setTimeout(() => document.getElementById('waiterNameInput').focus(), 50);
+    };
+});
+
+document.getElementById('nameContinueBtn').onclick = async () => {
+    const name = document.getElementById('waiterNameInput').value.trim();
+    if (!name) { await customAlert('Enter your name.'); return; }
+    identity = { deviceId, role: pendingRole, name };
+    saveIdentity();
+    registerDevice();
+    enterApp();
+};
+document.getElementById('nameBackBtn').onclick = () => {
+    nameStep.classList.add('hidden');
+    roleGate.classList.remove('hidden');
+};
+
+document.getElementById('adminAccessLink').onclick = async () => {
+    const code = await askAdminCode();
+    if (!code) return;
+    identity = { deviceId, role: 'admin', name: 'Admin' };
+    saveIdentity();
+    registerDevice();
+    enterApp();
+};
+
+/* ---------------- Custom modals ----------------
+   Native prompt()/alert()/confirm() get silently swallowed in a lot
+   of in-app/webview browsers (Netlify preview panes, messaging-app
+   browsers, some Android contexts) — the button just looks dead.
+   These build real on-screen modals instead, so they always show up. */
+
+function buildModal(innerHtml) {
+    const overlay = document.createElement('div');
+    overlay.className = 'fixed inset-0 bg-black/60 flex items-start justify-center p-6 overflow-y-auto z-50';
+    overlay.innerHTML = `<div class="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-sm p-5 mt-16">${innerHtml}</div>`;
+    document.body.appendChild(overlay);
+    return overlay;
+}
+
+function customAlert(msg) {
+    return new Promise(resolve => {
+        const overlay = buildModal(`
+            <p class="text-sm text-slate-200 mb-4">${escapeHtml(msg)}</p>
+            <button id="alertOkBtn" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-2.5 rounded-lg">OK</button>
+        `);
+        const finish = () => { overlay.remove(); resolve(); };
+        overlay.querySelector('#alertOkBtn').onclick = finish;
+        overlay.addEventListener('click', e => { if (e.target === overlay) finish(); });
+    });
+}
+
+function customConfirm(msg) {
+    return new Promise(resolve => {
+        const overlay = buildModal(`
+            <p class="text-sm text-slate-200 mb-4">${escapeHtml(msg)}</p>
+            <div class="flex gap-2">
+                <button id="confCancelBtn" class="flex-1 border border-slate-700 text-slate-300 py-2.5 rounded-lg">Cancel</button>
+                <button id="confOkBtn" class="flex-1 bg-rose-700 hover:bg-rose-600 text-white font-medium py-2.5 rounded-lg">Confirm</button>
+            </div>
+        `);
+        const finish = val => { overlay.remove(); resolve(val); };
+        overlay.querySelector('#confCancelBtn').onclick = () => finish(false);
+        overlay.querySelector('#confOkBtn').onclick = () => finish(true);
+        overlay.addEventListener('click', e => { if (e.target === overlay) finish(false); });
+    });
+}
+
+function askAdminCode() {
+    return new Promise(resolve => {
+        const overlay = buildModal(`
+            <h2 class="text-white font-bold mb-3">Admin access code</h2>
+            <input type="password" id="adminCodeInput" autocomplete="off" class="w-full bg-slate-950 border border-slate-800 rounded p-2.5 text-white text-sm mb-2">
+            <div id="adminCodeErr" class="hidden text-rose-400 text-xs font-mono mb-2">Incorrect code — try again.</div>
+            <div class="flex gap-2 mt-2">
+                <button id="adminCancelBtn" class="flex-1 border border-slate-700 text-slate-300 py-2.5 rounded-lg">Cancel</button>
+                <button id="adminOkBtn" class="flex-1 bg-purple-600 hover:bg-purple-500 text-white font-medium py-2.5 rounded-lg">Unlock</button>
+            </div>
+        `);
+        const input = overlay.querySelector('#adminCodeInput');
+        const err = overlay.querySelector('#adminCodeErr');
+        setTimeout(() => input.focus(), 50);
+        const finish = val => { overlay.remove(); resolve(val); };
+        const tryUnlock = () => {
+            const val = input.value.trim();
+            if (val && val === ADMIN_ACCESS_CODE) finish(val);
+            else { err.classList.remove('hidden'); input.value = ''; input.focus(); }
+        };
+        overlay.querySelector('#adminCancelBtn').onclick = () => finish(null);
+        overlay.querySelector('#adminOkBtn').onclick = tryUnlock;
+        input.addEventListener('keydown', e => { if (e.key === 'Enter') tryUnlock(); });
+        overlay.addEventListener('click', e => { if (e.target === overlay) finish(null); });
+    });
+}
+
+// Cook's own real-world guess, taken the moment they start a ticket —
+// not a theoretical number. This becomes the ETA shown to the waiter,
+// and it's what actually determines which ticket reaches the waiter
+// first (whichever's estimate comes due soonest), not raw order age.
+function askPrepEstimate() {
+    return new Promise(resolve => {
+        const overlay = buildModal(`
+            <h2 class="text-white font-bold mb-1">Estimated prep time</h2>
+            <p class="text-xs text-slate-400 mb-3">Your best real call — the waiter sees this as an ETA.</p>
+            <div class="flex items-center gap-2 mb-1">
+                <input type="number" min="0.5" step="0.5" id="prepMinInput" placeholder="e.g. 8" class="flex-1 bg-slate-950 border border-slate-800 rounded p-2.5 text-white text-sm">
+                <span class="text-xs text-slate-400 shrink-0">minutes</span>
+            </div>
+            <div class="flex gap-2 mt-3">
+                <button id="prepCancelBtn" class="flex-1 border border-slate-700 text-slate-300 py-2.5 rounded-lg">Cancel</button>
+                <button id="prepOkBtn" class="flex-1 bg-amber-600 hover:bg-amber-500 text-white font-medium py-2.5 rounded-lg">Start Cooking</button>
+            </div>
+        `);
+        const input = overlay.querySelector('#prepMinInput');
+        setTimeout(() => input.focus(), 50);
+        const finish = val => { overlay.remove(); resolve(val); };
+        const tryStart = () => {
+            const val = parseFloat(input.value);
+            if (!val || val <= 0) { input.focus(); return; }
+            finish(val);
+        };
+        overlay.querySelector('#prepCancelBtn').onclick = () => finish(null);
+        overlay.querySelector('#prepOkBtn').onclick = tryStart;
+        input.addEventListener('keydown', e => { if (e.key === 'Enter') tryStart(); });
+        overlay.addEventListener('click', e => { if (e.target === overlay) finish(null); });
+    });
+}
+
+async function startCooking(orderId) {
+    const mins = await askPrepEstimate();
+    if (mins == null) return;
+    await mutateOrders(list => {
+        const order = list.find(o => o.id === orderId);
+        if (!order) return;
+        const now = Date.now();
+        order.status = 'Preparing';
+        order.timestamps.cooking_started_at = now;
+        order.preparedBy = identity.name;
+        order.estimatedPrepMinutes = mins;
+        order.estimatedReadyAt = now + mins * 60000;
+        order.auditTrail = order.auditTrail || [];
+        order.auditTrail.push({ time: now, type: 'STATUS_CHANGE', message: `Started by ${identity.name} — est. ${mins} min` });
+    });
+}
+
+// Only Admin can leave its role and go back to the picker on the same
+// device — Waiter/Kitchen/Biller stay locked until an admin resets
+// them remotely from the Admin Deck.
+switchRoleBtn.onclick = () => {
+    if (!identity || identity.role !== 'admin') return;
+    app.classList.add('hidden');
+    roleGate.classList.remove('hidden');
+    clearRoleNotice();
+    identity = null;
+    saveIdentity();
+    stopPolling();
+};
+
+/* ---------------- App entry / polling ---------------- */
+
+async function enterApp() {
+    clearRoleNotice();
+    roleGate.classList.add('hidden');
+    nameStep.classList.add('hidden');
+    app.classList.remove('hidden');
+    switchRoleBtn.classList.toggle('hidden', identity.role !== 'admin');
+
+    const titles = {
+        waiter: ['Waiter POS', 'Clocked in as ' + identity.name],
+        kitchen: ['Kitchen KDS', 'Logged in as ' + identity.name],
+        biller: ['Biller Desk', 'Logged in as ' + identity.name],
+        admin: ['Admin Deck', 'Central audit & delay analytics']
+    };
+    viewTitle.textContent = titles[identity.role][0];
+    viewSub.textContent = titles[identity.role][1];
+
+    await loadOrders();
+    await loadTableSessions();
+    startPolling();
+}
+
+let pollTimer = null;
+let tickTimer = null;
+function startPolling() {
+    stopPolling();
+    pollTimer = setInterval(async () => {
+        await heartbeatAndCheckRevoked();
+        if (!identity) return;
+        await loadOrders(true);
+        await loadTableSessions(true);
+    }, POLL_MS);
+    // 1s local tick just re-renders live "so far" durations from
+    // whatever's already in memory — no network call.
+    tickTimer = setInterval(() => render(), 1000);
+}
+function stopPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    if (tickTimer) clearInterval(tickTimer);
+    pollTimer = null; tickTimer = null;
+}
+
+/* ---------------- Storage: orders ---------------- */
+
+async function loadOrders(silent) {
+    // Don't let a background sync stomp on someone mid-keystroke —
+    // pulling in a poll result right now could overwrite what they're
+    // typing, or worse, rebuild the field out from under them entirely.
+    if (isTypingInInput()) return;
+    try {
+        const res = await window.storage.get(STORAGE_KEY, true);
+        const newOrders = res && res.value ? JSON.parse(res.value) : [];
+        const serializedNew = JSON.stringify(newOrders);
+        if (serializedNew !== lastOrdersSnapshot) {
+            orders = newOrders;
+            lastOrdersSnapshot = serializedNew;
+            render();
+        }
+    } catch (e) {
+        if (!silent) orders = orders || [];
+    }
+}
+
+async function saveOrders() {
+    const payload = JSON.stringify(orders);
+    try {
+        const res = await window.storage.set(STORAGE_KEY, payload, true);
+        if (res) return;
+        throw new Error('empty response');
+    } catch (e) {
+        try {
+            await window.storage.set(STORAGE_KEY, payload, false);
+            showWarning("Couldn't sync to other devices — saved on this device only.");
+        } catch (e2) {
+            showWarning("Not saved — this device's storage may be full or blocked (e.g. private browsing).");
+        }
+    }
+}
+
+// Fetch-modify-save: re-reads the shared list right before mutating so
+// two devices editing around the same moment don't stomp on each
+// other's changes as badly as a stale in-memory write would.
+async function mutateOrders(fn) {
+    try {
+        const res = await window.storage.get(STORAGE_KEY, true);
+        orders = res && res.value ? JSON.parse(res.value) : orders;
+    } catch (e) { /* proceed with last-known local copy */ }
+    fn(orders);
+    await saveOrders();
+    lastOrdersSnapshot = JSON.stringify(orders);
+    render();
+}
+
+/* ---------------- Storage: table sessions (Engaged/Available) ----------------
+   Kept as its own record separate from orders — a table's floor status
+   is a different fact than any order on it, tracked and synced the
+   same way (poll, diff-before-render, fetch-modify-save). */
+
+async function loadTableSessions(silent) {
+    if (isTypingInInput()) return;
+    try {
+        const res = await window.storage.get(TABLE_KEY, true);
+        const fresh = res && res.value ? JSON.parse(res.value) : [];
+        const serialized = JSON.stringify(fresh);
+        if (serialized !== lastTableSnapshot) {
+            tableSessions = fresh;
+            lastTableSnapshot = serialized;
+            render();
+        }
+    } catch (e) {
+        if (!silent) tableSessions = tableSessions || [];
+    }
+}
+
+async function saveTableSessions() {
+    const payload = JSON.stringify(tableSessions);
+    try {
+        const res = await window.storage.set(TABLE_KEY, payload, true);
+        if (res) return;
+        throw new Error('empty response');
+    } catch (e) {
+        try {
+            await window.storage.set(TABLE_KEY, payload, false);
+            showWarning("Couldn't sync table status to other devices — saved on this device only.");
+        } catch (e2) {
+            showWarning("Not saved — this device's storage may be full or blocked (e.g. private browsing).");
+        }
+    }
+}
+
+async function mutateTableSessions(fn) {
+    try {
+        const res = await window.storage.get(TABLE_KEY, true);
+        tableSessions = res && res.value ? JSON.parse(res.value) : tableSessions;
+    } catch (e) { /* proceed with last-known local copy */ }
+    fn(tableSessions);
+    await saveTableSessions();
+    lastTableSnapshot = JSON.stringify(tableSessions);
+    render();
+}
+
+function newSessionId() { return 'TBL-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5); }
+
+function getOpenSession(table) {
+    return tableSessions.find(s => s.table === table && !s.freedAt);
+}
+
+// Engaged is automatic — the moment a table number is first used, this
+// creates the record. Reusing an already-open table (another round)
+// just returns the existing session, no duplicate engage stamp.
+async function ensureTableEngaged(table) {
+    let session = getOpenSession(table);
+    if (session) return session;
+    session = { id: newSessionId(), table, waiter: identity.name, engagedAt: Date.now(), freedAt: null, freedBy: null };
+    await mutateTableSessions(list => list.push(session));
+    return session;
+}
+
+// Available is the one manual step — entirely the waiter's call, has
+// nothing to do with whether Biller has been paid yet. Warns (doesn't
+// block) if something's still mid-flight, since real service doesn't
+// always end cleanly.
+async function markTableAvailable(table) {
+    const session = getOpenSession(table);
+    if (!session) return;
+    const unfinished = orders.filter(o => o.tableSessionId === session.id && o.status !== 'Served' && o.status !== 'Paid');
+    if (unfinished.length > 0) {
+        const proceed = await customConfirm(`This table still has ${unfinished.length} round(s) not yet served. Mark it available anyway?`);
+        if (!proceed) return;
+    }
+    await mutateTableSessions(list => {
+        const s = list.find(x => x.id === session.id);
+        if (!s) return;
+        s.freedAt = Date.now();
+        s.freedBy = identity.name;
+    });
+}
+
+let warned = false;
+function showWarning(msg) {
+    warnBar.textContent = msg;
+    warnBar.classList.remove('hidden');
+    if (warned) return;
+    warned = true;
+    setTimeout(() => { warnBar.classList.add('hidden'); warned = false; }, 4000);
+}
+
+/* ---------------- Helpers (match OrderRail Enterprise formatting) ---------------- */
+
+function formatExactTime(timestamp) {
+    if (!timestamp) return 'Pending...';
+    const date = new Date(timestamp);
+    const time = date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const day = String(date.getDate()).padStart(2, '0');
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const year = String(date.getFullYear()).slice(-2);
+    return `${time} ${day}/${month}/${year}`;
+}
+
+function getDurationText(start, end) {
+    if (!start || !end) return 'In Progress...';
+    const secs = Math.floor((end - start) / 1000);
+    if (secs < 60) return `${secs}s`;
+    return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+}
+
+function escapeHtml(str) { const d = document.createElement('div'); d.textContent = String(str); return d.innerHTML; }
+
+// True while the person has ANY text field focused, anywhere — used to
+// pause background refreshes so a rebuild never yanks focus out from
+// under someone mid-type (which is what pops the mobile keyboard
+// up/down and eats keystrokes). Covers every input, not just draft
+// item rows — "Start a new table," future search boxes, etc.
+function isTypingInInput() {
+    const el = document.activeElement;
+    return !!(el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'));
+}
+
+function orderTotal(order) {
+    return (order.items || []).reduce((s, i) => s + (Number(i.qty) || 0) * (Number(i.price) || 0), 0);
+}
+
+function itemsSummaryText(order) {
+    const items = (order.items || []).filter(i => i.name && i.name.trim());
+    if (items.length === 0) return '(no items yet)';
+    return items.map(i => `${i.name} x${i.qty}`).join(', ');
+}
+
+// Which round number this order is for its table (1st, 2nd, 3rd...),
+// based on when each round was locked/sent — used to flag "top-up"
+// rounds on Kitchen's screen and to label rounds on the waiter's screen.
+function roundNumberFor(order) {
+    const sameGroup = orders
+        .filter(o => o.status !== 'Draft' && (order.tableSessionId ? o.tableSessionId === order.tableSessionId : o.table === order.table))
+        .sort((a, b) => (a.timestamps.order_taken_at || 0) - (b.timestamps.order_taken_at || 0));
+    const idx = sameGroup.findIndex(o => o.id === order.id);
+    return idx === -1 ? 1 : idx + 1;
+}
+
+// Live countdown text based on the cook's own estimate — only
+// meaningful while actively Preparing; null once Ready/Served/Paid.
+function etaText(order) {
+    if (order.status !== 'Preparing' || !order.estimatedReadyAt) return null;
+    const remainingMs = order.estimatedReadyAt - Date.now();
+    if (remainingMs <= 0) return 'past estimate';
+    const mins = Math.floor(remainingMs / 60000);
+    const secs = Math.floor((remainingMs % 60000) / 1000);
+    return mins > 0 ? `~${mins}m ${secs}s` : `~${secs}s`;
+}
+
+/* ---------------- Order creation & status transitions ----------------
+   A "round" is one order ID. It starts life as a Draft: freely
+   editable — add/edit/delete items, as many times as needed, with no
+   network call per keystroke (only a debounced background save so
+   other devices eventually see it, though Drafts are filtered out of
+   every non-waiter view anyway). "Send to Kitchen" is the lock
+   moment — items freeze, order_taken_at stamps (that's when Kitchen's
+   delay clock starts, not when drafting began), and it becomes
+   visible everywhere else. Want to add more after that? Start a new
+   round on the same table — never edit a locked one. */
+
+function newItemId() { return 'itm_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+
+async function startNewRound(table) {
+    const session = await ensureTableEngaged(table);
+    const now = Date.now();
+    const draft = {
+        id: 'ORD-' + Math.floor(1000 + Math.random() * 9000) + '-' + now.toString(36).slice(-3).toUpperCase(),
+        table,
+        tableSessionId: session.id,
+        waiter: identity.name,
+        items: [{ id: newItemId(), name: '', qty: 1, price: 0 }],
+        status: 'Draft',
+        timestamps: { order_taken_at: null, cooking_started_at: null, ready_at: null, served_at: null, completed_at: null },
+        auditTrail: [{ time: now, type: 'DRAFT_STARTED', message: `Draft opened by ${identity.name}` }]
+    };
+    await mutateOrders(list => list.push(draft));
+}
+
+function addDraftItemRow(orderId) {
+    const order = orders.find(o => o.id === orderId);
+    if (!order || order.status !== 'Draft') return;
+    order.items.push({ id: newItemId(), name: '', qty: 1, price: 0 });
+    renderWaiter(); // structural change — safe to fully re-render, no field is mid-type
+    saveDraftDebounced();
+}
+
+function deleteDraftItemRow(orderId, itemId) {
+    const order = orders.find(o => o.id === orderId);
+    if (!order || order.status !== 'Draft') return;
+    order.items = order.items.filter(i => i.id !== itemId);
+    if (order.items.length === 0) order.items.push({ id: newItemId(), name: '', qty: 1, price: 0 });
+    renderWaiter();
+    saveDraftDebounced();
+}
+
+// Local-first field edit: mutate in-memory only, update the live total
+// in place, and DON'T re-render (would drop keyboard focus mid-type).
+// A debounced save pushes it to shared storage a moment after typing
+// stops, so it survives an app close without needing a tap per field.
+function editDraftItemField(orderId, itemId, field, rawValue) {
+    const order = orders.find(o => o.id === orderId);
+    if (!order || order.status !== 'Draft') return;
+    const item = order.items.find(i => i.id === itemId);
+    if (!item) return;
+    if (field === 'name') item.name = rawValue;
+    if (field === 'qty') item.qty = Math.max(1, parseInt(rawValue) || 1);
+    if (field === 'price') item.price = Math.max(0, parseFloat(rawValue) || 0);
+
+    const totalEl = document.getElementById('draft-total-' + orderId);
+    if (totalEl) totalEl.textContent = '₹' + orderTotal(order).toFixed(2);
+    saveDraftDebounced();
+}
+
+let saveDraftTimer = null;
+function saveDraftDebounced() {
+    if (saveDraftTimer) clearTimeout(saveDraftTimer);
+    saveDraftTimer = setTimeout(async () => {
+        await saveOrders();
+        lastOrdersSnapshot = JSON.stringify(orders);
+    }, 700);
+}
+
+async function sendRoundToKitchen(orderId) {
+    const order = orders.find(o => o.id === orderId);
+    if (!order) return;
+    const realItems = (order.items || []).filter(i => i.name && i.name.trim());
+    if (realItems.length === 0) {
+        await customAlert('Add at least one item before sending to the kitchen.');
+        return;
+    }
+    if (!(await customConfirm(`Lock this round and send ${realItems.length} item(s) to the kitchen? You won't be able to edit it after this — confirm with the customer first.`))) return;
+
+    await mutateOrders(list => {
+        const o = list.find(x => x.id === orderId);
+        if (!o) return;
+        o.items = realItems;
+        const now = Date.now();
+        o.status = 'Placed';
+        o.timestamps.order_taken_at = now;
+        o.auditTrail = o.auditTrail || [];
+        o.auditTrail.push({ time: now, type: 'LOCKED', message: `Sent to kitchen by ${identity.name} — locked` });
+    });
+}
+
+async function deleteDraftRound(orderId) {
+    if (!(await customConfirm('Discard this draft round entirely?'))) return;
+    await mutateOrders(list => {
+        const idx = list.findIndex(o => o.id === orderId);
+        if (idx !== -1) list.splice(idx, 1);
+    });
+}
+
+async function updateStatus(id, nextStatus) {
+    await mutateOrders(list => {
+        const order = list.find(o => o.id === id);
+        if (!order) return;
+        const now = Date.now();
+        order.status = nextStatus;
+        if (nextStatus === 'Preparing') { order.timestamps.cooking_started_at = now; order.preparedBy = identity.name; }
+        if (nextStatus === 'Ready') order.timestamps.ready_at = now;
+        if (nextStatus === 'Served') { order.timestamps.served_at = now; order.servedBy = identity.name; }
+        if (nextStatus === 'Paid') { order.timestamps.completed_at = now; order.paidBy = identity.name; }
+
+        order.auditTrail = order.auditTrail || [];
+        order.auditTrail.push({ time: now, type: 'STATUS_CHANGE', message: `Moved to ${nextStatus} by ${identity.name}` });
+    });
+}
+
+async function resetSystemData() {
+    if (!(await customConfirm('Clear ALL orders, table status, and logs for everyone? This cannot be undone.'))) return;
+    await mutateOrders(list => list.length = 0);
+    await mutateTableSessions(list => list.length = 0);
+}
+
+/* ---------------- Renderers ---------------- */
+
+function render() {
+    if (!identity) return;
+    // Never let a timer-driven re-render (the 1s tick, a poll) yank
+    // focus out from under someone mid-type, anywhere in the app.
+    if (isTypingInInput()) return;
+    if (identity.role === 'waiter') renderWaiter();
+    else if (identity.role === 'kitchen') renderKitchen();
+    else if (identity.role === 'biller') renderBiller();
+    else if (identity.role === 'admin') renderAdmin();
+}
+
+function statusBadge(status) {
+    return `<span class="px-2 py-0.5 rounded bg-slate-800 ${STATUS_COLOR[status] || 'text-white'} text-xs font-mono">${STATUS_LABELS[status] || status}</span>`;
+}
+
+/* ---- WAITER ---- */
+function renderWaiter() {
+    const mine = orders.filter(o => o.waiter === identity.name);
+    const myOpenSessions = tableSessions.filter(s => s.waiter === identity.name && !s.freedAt);
+    const myClosedToday = tableSessions.filter(s => s.waiter === identity.name && s.freedAt && isToday(s.freedAt))
+        .sort((a, b) => b.freedAt - a.freedAt);
+
+    bodyWrap.innerHTML = `
+        <div class="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow mb-6">
+            <h2 class="text-sm font-semibold text-emerald-400 mb-3">Start a new table</h2>
+            <div class="flex gap-2">
+                <input type="text" id="new-table-input" placeholder="e.g. Table 5" class="flex-1 bg-slate-950 border border-slate-800 rounded p-2.5 text-white text-sm">
+                <button id="startTableBtn" class="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2 rounded-lg text-sm font-medium shrink-0">Start</button>
+            </div>
+        </div>
+        <div id="waiter-up-next" class="mb-6"></div>
+        <div id="waiter-tables-list" class="space-y-4"></div>
+        <div id="waiter-closed-list" class="mt-6"></div>
+    `;
+
+    // Up Next — every round of mine currently cooking, across every
+    // table, sorted by whichever ETA comes due soonest. This is the
+    // real "what's coming to me next" queue — not order-placed order.
+    const cooking = mine.filter(o => o.status === 'Preparing' && o.estimatedReadyAt)
+        .sort((a, b) => a.estimatedReadyAt - b.estimatedReadyAt);
+    const upNextEl = document.getElementById('waiter-up-next');
+    if (cooking.length > 0) {
+        upNextEl.innerHTML = `
+            <div class="bg-slate-900 p-4 rounded-xl border border-cyan-800/50 shadow">
+                <h2 class="text-xs font-semibold text-cyan-400 mb-2 uppercase tracking-wide">Up next &middot; soonest ETA first</h2>
+                <div class="space-y-1.5" id="up-next-rows"></div>
+            </div>
+        `;
+        const rows = document.getElementById('up-next-rows');
+        cooking.forEach(o => {
+            const row = document.createElement('div');
+            row.className = 'flex justify-between items-center text-xs bg-slate-950 rounded p-2';
+            row.innerHTML = `
+                <span class="text-white">${escapeHtml(o.table)} <span class="text-slate-500">&middot; Round #${roundNumberFor(o)}</span></span>
+                <span class="text-cyan-400 font-mono font-bold">${etaText(o) || '—'}</span>
+            `;
+            rows.appendChild(row);
+        });
+    } else {
+        upNextEl.innerHTML = '';
+    }
+
+    document.getElementById('startTableBtn').onclick = async () => {
+        const input = document.getElementById('new-table-input');
+        const table = input.value.trim();
+        if (!table) { await customAlert('Enter a table name or number.'); return; }
+        input.value = '';
+        await startNewRound(table);
+    };
+    document.getElementById('new-table-input').addEventListener('keydown', e => {
+        if (e.key === 'Enter') document.getElementById('startTableBtn').click();
+    });
+
+    const list = document.getElementById('waiter-tables-list');
+    if (myOpenSessions.length === 0) {
+        list.innerHTML = '<p class="text-slate-500 text-xs">No tables engaged right now — start one above.</p>';
+    }
+
+    myOpenSessions.slice().sort((a, b) => a.engagedAt - b.engagedAt).forEach(session => {
+        const table = session.table;
+        const ordered = mine.filter(o => o.tableSessionId === session.id || (!o.tableSessionId && o.table === table));
+        const unpaidTotal = ordered.filter(o => o.status !== 'Paid' && o.status !== 'Draft').reduce((s, o) => s + orderTotal(o), 0);
+        const hasDraft = ordered.some(o => o.status === 'Draft');
+        const allServedOrPaid = ordered.length > 0 && ordered.every(o => o.status === 'Served' || o.status === 'Paid');
+
+        const card = document.createElement('div');
+        card.className = 'bg-slate-900 p-5 rounded-xl border border-slate-800 shadow';
+        card.innerHTML = `
+            <div class="flex justify-between items-start mb-3 gap-2">
+                <div>
+                    <h3 class="text-white font-bold text-sm">${escapeHtml(table)} <span class="text-slate-500 font-normal text-xs font-mono">(${ordered.length} round${ordered.length === 1 ? '' : 's'})</span></h3>
+                    <span class="text-[10px] font-mono text-emerald-400">Engaged since ${formatExactTime(session.engagedAt)}</span>
+                </div>
+                <span class="text-emerald-400 font-mono font-bold text-sm shrink-0">₹${unpaidTotal.toFixed(2)} <span class="text-slate-500 font-normal text-[10px]">unpaid</span></span>
+            </div>
+            <div class="rounds-slot space-y-3 mb-3"></div>
+            <button class="mark-available-btn w-full ${allServedOrPaid ? 'bg-slate-700 hover:bg-slate-600 text-white' : 'border border-slate-700 text-slate-400 hover:text-slate-200'} text-xs py-2 rounded-lg">
+                ${allServedOrPaid ? 'Mark table available' : 'Mark table available (still has open rounds)'}
+            </button>
+        `;
+        const roundsSlot = card.querySelector('.rounds-slot');
+
+        ordered.forEach((order, idx) => {
+            roundsSlot.appendChild(order.status === 'Draft' ? buildDraftRoundEl(order, idx + 1) : buildLockedRoundEl(order, idx + 1));
+        });
+
+        if (!hasDraft) {
+            const addBtn = document.createElement('button');
+            addBtn.className = 'w-full mb-2 border border-dashed border-slate-700 text-slate-400 hover:text-emerald-400 hover:border-emerald-600 text-xs py-2 rounded-lg';
+            addBtn.textContent = '+ Add another round';
+            addBtn.onclick = () => startNewRound(table);
+            roundsSlot.appendChild(addBtn);
+        }
+
+        card.querySelector('.mark-available-btn').onclick = () => markTableAvailable(table);
+
+        list.appendChild(card);
+    });
+
+    const closedEl = document.getElementById('waiter-closed-list');
+    if (myClosedToday.length > 0) {
+        closedEl.innerHTML = `
+            <div class="text-[10px] uppercase tracking-wide text-slate-600 mb-2">Closed tables today</div>
+            <div class="space-y-1.5" id="closed-rows"></div>
+        `;
+        const rows = document.getElementById('closed-rows');
+        myClosedToday.forEach(s => {
+            const row = document.createElement('div');
+            row.className = 'flex justify-between text-[11px] text-slate-500 bg-slate-950/60 rounded p-2';
+            row.innerHTML = `<span>${escapeHtml(s.table)}</span><span>freed ${formatExactTime(s.freedAt)}</span>`;
+            rows.appendChild(row);
+        });
+    } else {
+        closedEl.innerHTML = '';
+    }
+}
+
+function buildDraftRoundEl(order, roundNum) {
+    const wrap = document.createElement('div');
+    wrap.className = 'bg-slate-950 border border-emerald-800/60 rounded-lg p-3';
+    wrap.innerHTML = `
+        <div class="flex justify-between items-center mb-2">
+            <span class="text-xs font-mono text-emerald-400 font-bold">Round #${roundNum} &middot; building&hellip;</span>
+            <span id="draft-total-${order.id}" class="text-emerald-400 font-mono font-bold text-sm">₹${orderTotal(order).toFixed(2)}</span>
+        </div>
+        <div class="items-slot space-y-2 mb-2"></div>
+        <div class="flex gap-2 mb-2">
+            <button class="add-item-btn flex-1 border border-slate-700 text-slate-300 hover:border-emerald-600 hover:text-emerald-400 text-xs py-2 rounded-lg">+ Add item</button>
+            <button class="discard-btn text-rose-400 hover:text-rose-300 text-xs px-3">Discard</button>
+        </div>
+        <button class="send-btn w-full bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium py-2.5 rounded-lg">Send to Kitchen &mdash; locks this round</button>
+    `;
+
+    const itemsSlot = wrap.querySelector('.items-slot');
+    order.items.forEach(item => itemsSlot.appendChild(buildDraftItemRowEl(order, item)));
+
+    wrap.querySelector('.add-item-btn').onclick = () => addDraftItemRow(order.id);
+    wrap.querySelector('.discard-btn').onclick = () => deleteDraftRound(order.id);
+    wrap.querySelector('.send-btn').onclick = () => sendRoundToKitchen(order.id);
+    return wrap;
+}
+
+function buildDraftItemRowEl(order, item) {
+    const row = document.createElement('div');
+    row.className = 'draft-item-row flex gap-1.5 items-center';
+    row.innerHTML = `
+        <input type="text" class="item-name flex-1 min-w-0 bg-slate-900 border border-slate-800 rounded p-2 text-white text-xs" placeholder="Item name">
+        <input type="number" min="1" class="item-qty w-14 bg-slate-900 border border-slate-800 rounded p-2 text-white text-xs" placeholder="Qty">
+        <input type="number" min="0" class="item-price w-20 bg-slate-900 border border-slate-800 rounded p-2 text-white text-xs" placeholder="₹">
+        <button class="del-item-btn text-rose-400 hover:text-rose-300 text-sm px-1.5 shrink-0">&times;</button>
+    `;
+    const nameEl = row.querySelector('.item-name');
+    const qtyEl = row.querySelector('.item-qty');
+    const priceEl = row.querySelector('.item-price');
+    nameEl.value = item.name;
+    qtyEl.value = item.qty;
+    priceEl.value = item.price || '';
+
+    nameEl.oninput = e => editDraftItemField(order.id, item.id, 'name', e.target.value);
+    qtyEl.oninput = e => editDraftItemField(order.id, item.id, 'qty', e.target.value);
+    priceEl.oninput = e => editDraftItemField(order.id, item.id, 'price', e.target.value);
+    row.querySelector('.del-item-btn').onclick = () => deleteDraftItemRow(order.id, item.id);
+    return row;
+}
+
+function buildLockedRoundEl(order, roundNum) {
+    const wrap = document.createElement('div');
+    wrap.className = 'bg-slate-950 p-3 rounded border border-slate-800 text-xs' + (order.status === 'Ready' ? ' border-cyan-700' : '');
+    const eta = etaText(order);
+    wrap.innerHTML = `
+        <div class="flex justify-between items-start gap-3">
+            <div class="min-w-0">
+                <span class="font-mono text-slate-500">Round #${roundNum}</span>
+                ${eta ? `<span class="text-[10px] font-mono text-cyan-400 ml-1">ETA ${eta}</span>` : ''}
+                <span class="round-serve-slot"></span>
+                &middot; <span class="font-bold text-emerald-400">${order.id}</span>
+                <div class="text-white mt-0.5">${escapeHtml(itemsSummaryText(order))}</div>
+                <div class="text-slate-400 mt-0.5">${statusBadge(order.status)} &middot; Taken: ${formatExactTime(order.timestamps.order_taken_at)}</div>
+            </div>
+            <span class="text-emerald-400 font-mono font-bold shrink-0">₹${orderTotal(order).toFixed(2)}</span>
+        </div>
+    `;
+    if (order.status === 'Ready') {
+        // Kitchen has it ready to go — waiter taps this the moment it's
+        // physically handed off at the table. That single tap is what
+        // Biller/Admin read as "delivered, ready to bill."
+        const btn = document.createElement('button');
+        btn.className = 'bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-medium px-2 py-0.5 rounded ml-1.5';
+        btn.textContent = 'Mark Served';
+        btn.onclick = () => updateStatus(order.id, 'Served');
+        wrap.querySelector('.round-serve-slot').appendChild(btn);
+    }
+    return wrap;
+}
+
+/* ---- KITCHEN ---- */
+function renderKitchen() {
+    bodyWrap.innerHTML = `
+        <div class="bg-slate-900 p-6 rounded-xl border border-slate-800 shadow">
+            <h2 class="text-lg font-semibold mb-4 text-amber-400">Kitchen Display System (KDS)</h2>
+            <div id="kitchen-orders-list" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+        </div>
+    `;
+    const list = document.getElementById('kitchen-orders-list');
+    const active = orders
+        .filter(o => o.status !== 'Draft' && o.status !== 'Paid' && o.status !== 'Served')
+        .sort((a, b) => (a.timestamps.order_taken_at || 0) - (b.timestamps.order_taken_at || 0)); // oldest first — FIFO queue
+    list.innerHTML = active.length === 0 ? '<p class="text-slate-500 text-xs">No open tickets.</p>' : '';
+
+    active.forEach(o => {
+        const waitTime = getDurationText(o.timestamps.order_taken_at, o.timestamps.cooking_started_at);
+        const eta = etaText(o);
+        const roundNum = roundNumberFor(o);
+
+        // Escalate an unclaimed ticket the longer it sits — full-service
+        // pace: amber past 5 min waiting, red past 10.
+        let urgencyClass = 'border-slate-800';
+        if (o.status === 'Placed') {
+            const waitedMs = Date.now() - o.timestamps.order_taken_at;
+            if (waitedMs > 10 * 60000) urgencyClass = 'border-rose-600 ring-1 ring-rose-600/40';
+            else if (waitedMs > 5 * 60000) urgencyClass = 'border-amber-500';
+        }
+
+        const card = document.createElement('div');
+        card.className = `bg-slate-950 p-4 rounded border ${urgencyClass} flex flex-col justify-between`;
+        card.innerHTML = `
+            <div>
+                <div class="flex justify-between font-bold text-amber-400 text-sm">
+                    <span>${o.id} ${roundNum > 1 ? `<span class="ml-1 text-[10px] font-mono px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/40">Round #${roundNum} for this table</span>` : ''}</span>
+                    <span>Table: ${escapeHtml(o.table)}</span>
+                </div>
+                <div class="text-sm text-white my-2 font-medium">${escapeHtml(itemsSummaryText(o))}</div>
+                <div class="text-xs text-slate-400 font-mono">Order Stamp: ${formatExactTime(o.timestamps.order_taken_at)}</div>
+                <div class="text-xs text-slate-400 mt-1">Kitchen Pickup Delay: <span class="text-amber-400 font-mono font-bold">${waitTime}</span></div>
+                ${o.preparedBy ? `<div class="text-xs text-slate-500 mt-1">Cooking: <span class="text-slate-300">${escapeHtml(o.preparedBy)}</span>${o.estimatedPrepMinutes ? ` <span class="text-slate-600">(est. ${o.estimatedPrepMinutes}m)</span>` : ''}</div>` : ''}
+                ${eta ? `<div class="text-xs mt-1">ETA to waiter: <span class="text-cyan-400 font-mono font-bold">${eta}</span></div>` : ''}
+                <div class="text-xs mt-2">${statusBadge(o.status)}</div>
+            </div>
+            <div class="mt-4 flex space-x-2 action-slot"></div>
+        `;
+        const slot = card.querySelector('.action-slot');
+        if (o.status === 'Placed') {
+            const btn = document.createElement('button');
+            btn.className = 'flex-1 bg-amber-600 hover:bg-amber-500 py-1.5 text-xs rounded text-white font-medium';
+            btn.textContent = 'Start Cooking';
+            btn.onclick = () => startCooking(o.id);
+            slot.appendChild(btn);
+        } else if (o.status === 'Preparing') {
+            const btn = document.createElement('button');
+            btn.className = 'flex-1 bg-cyan-600 hover:bg-cyan-500 py-1.5 text-xs rounded text-white font-medium';
+            btn.textContent = 'Mark Ready';
+            btn.onclick = () => updateStatus(o.id, 'Ready');
+            slot.appendChild(btn);
+        } else if (o.status === 'Ready') {
+            const note = document.createElement('div');
+            note.className = 'flex-1 text-center text-xs text-cyan-400 font-mono py-1.5';
+            note.textContent = 'Awaiting waiter pickup…';
+            slot.appendChild(note);
+        }
+        list.appendChild(card);
+    });
+}
+
+/* ---- BILLER ---- */
+function renderBiller() {
+    bodyWrap.innerHTML = `
+        <div class="bg-slate-900 p-6 rounded-xl border border-slate-800 shadow mb-6">
+            <h2 class="text-lg font-semibold mb-4 text-cyan-400">Biller Desk &amp; Live Floor Monitor</h2>
+            <div id="biller-orders-list" class="space-y-3"></div>
+        </div>
+        <div class="bg-slate-900 p-6 rounded-xl border border-slate-800 shadow">
+            <h2 class="text-lg font-semibold mb-4 text-cyan-400">Paid Today</h2>
+            <div id="biller-paid-list" class="space-y-2"></div>
+        </div>
+    `;
+    const active = orders.filter(o => o.status !== 'Draft' && o.status !== 'Paid');
+    const activeList = document.getElementById('biller-orders-list');
+    activeList.innerHTML = active.length === 0 ? '<p class="text-slate-500 text-xs">No open tables right now.</p>' : '';
+
+    active.slice().reverse().forEach(o => {
+        const row = document.createElement('div');
+        row.className = 'bg-slate-950 p-3 rounded border border-slate-800 flex justify-between items-center text-xs gap-3 ' + (o.status === 'Served' ? 'border-cyan-700' : '');
+        row.innerHTML = `
+            <div>
+                <span class="font-bold text-cyan-400">${o.id}</span> (<span class="text-amber-300">${escapeHtml(o.table)}</span>) -
+                <span class="text-white">${escapeHtml(itemsSummaryText(o))}</span> ·
+                <span class="text-emerald-400 font-mono font-bold">₹${orderTotal(o).toFixed(2)}</span>
+                <div class="text-slate-400 mt-0.5">Waiter: ${escapeHtml(o.waiter)} | ${statusBadge(o.status)} | Taken: ${formatExactTime(o.timestamps.order_taken_at)}</div>
+            </div>
+        `;
+        if (o.status === 'Served') {
+            const btn = document.createElement('button');
+            btn.className = 'bg-cyan-600 hover:bg-cyan-500 px-3 py-1 rounded text-white font-medium shrink-0';
+            btn.textContent = 'Mark Paid';
+            btn.onclick = () => updateStatus(o.id, 'Paid');
+            row.appendChild(btn);
+        }
+        activeList.appendChild(row);
+    });
+
+    const paidToday = orders.filter(o => o.status === 'Paid' && o.timestamps.completed_at && isToday(o.timestamps.completed_at));
+    const paidList = document.getElementById('biller-paid-list');
+    paidList.innerHTML = paidToday.length === 0 ? '<p class="text-slate-500 text-xs">No payments cleared yet today.</p>' : '';
+    paidToday.sort((a, b) => b.timestamps.completed_at - a.timestamps.completed_at).forEach(o => {
+        const row = document.createElement('div');
+        row.className = 'bg-slate-950 p-2.5 rounded border border-slate-800 flex justify-between items-center text-xs';
+        row.innerHTML = `
+            <span>${o.id} · ${escapeHtml(o.table)} · ${escapeHtml(itemsSummaryText(o))}${o.paidBy ? ` · <span class="text-slate-500">by ${escapeHtml(o.paidBy)}</span>` : ''}</span>
+            <span class="text-emerald-400 font-mono font-bold">₹${orderTotal(o).toFixed(2)} <span class="text-slate-500 font-normal">@ ${formatExactTime(o.timestamps.completed_at)}</span></span>
+        `;
+        paidList.appendChild(row);
+    });
+}
+
+function isToday(ts) {
+    const d = new Date(ts), n = new Date();
+    return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
+}
+
+/* ---- ADMIN ---- */
+function renderAdmin() {
+    const committedOrders = orders.filter(o => o.status !== 'Draft');
+    const todayOrders = committedOrders.filter(o => isToday(o.timestamps.order_taken_at));
+    const activeOrders = committedOrders.filter(o => o.status !== 'Paid');
+    const revenueToday = committedOrders.filter(o => o.status === 'Paid' && o.timestamps.completed_at && isToday(o.timestamps.completed_at)).reduce((s, o) => s + orderTotal(o), 0);
+    const pendingAmount = activeOrders.reduce((s, o) => s + orderTotal(o), 0);
+    const overdueCount = committedOrders.filter(o => o.status === 'Placed' && (Date.now() - o.timestamps.order_taken_at) > 5 * 60000).length;
+
+    bodyWrap.innerHTML = `
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
+            ${adminCard('Active orders', activeOrders.length)}
+            ${adminCard("Today's orders", todayOrders.length)}
+            ${adminCard('Revenue today', '₹' + revenueToday.toFixed(2))}
+            ${adminCard('Pending (unpaid)', '₹' + pendingAmount.toFixed(2))}
+            ${adminCard('Overdue pickup', overdueCount, overdueCount > 0)}
+        </div>
+
+        <div class="bg-slate-900 p-6 rounded-xl border border-slate-800 shadow mb-6">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-lg font-semibold text-purple-400">Central Master Audit &amp; Delay Analytics</h2>
+                <button id="resetLogsBtn" class="bg-rose-900/50 hover:bg-rose-900 text-rose-200 text-xs px-3 py-1.5 rounded border border-rose-700">Factory Reset Logs</button>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left text-sm text-slate-300">
+                    <thead class="bg-slate-950 text-xs uppercase text-slate-400 border-b border-slate-800">
+                        <tr>
+                            <th class="p-3">Order ID / Table</th>
+                            <th class="p-3">Waiter Name</th>
+                            <th class="p-3 text-emerald-400">Order Taken Stamp</th>
+                            <th class="p-3 text-amber-400">Kitchen Pickup Delay</th>
+                            <th class="p-3 text-cyan-400">Cooking Duration</th>
+                            <th class="p-3 text-purple-400">Total Journey Time</th>
+                            <th class="p-3">Status / Amount</th>
+                        </tr>
+                    </thead>
+                    <tbody id="admin-audit-table"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="bg-slate-900 p-6 rounded-xl border border-slate-800 shadow mb-6">
+            <h2 class="text-lg font-semibold mb-4 text-slate-300">By Waiter — Today</h2>
+            <div id="admin-waiter-table" class="space-y-2 font-mono text-xs"></div>
+        </div>
+
+        <div class="bg-slate-900 p-6 rounded-xl border border-slate-800 shadow mb-6">
+            <h2 class="text-lg font-semibold mb-4 text-slate-300">Table Sessions &mdash; Engaged / Available</h2>
+            <div id="admin-table-sessions" class="space-y-2"></div>
+        </div>
+
+        <div class="bg-slate-900 p-6 rounded-xl border border-slate-800 shadow">
+            <h2 class="text-lg font-semibold mb-4 text-slate-300">Devices</h2>
+            <div id="admin-device-list" class="space-y-2"></div>
+        </div>
+    `;
+
+    document.getElementById('resetLogsBtn').onclick = resetSystemData;
+
+    const auditTable = document.getElementById('admin-audit-table');
+    auditTable.innerHTML = committedOrders.length === 0 ? '<tr><td colspan="7" class="p-4 text-slate-500 text-center">No floor orders logged yet.</td></tr>' : '';
+    committedOrders.slice().reverse().forEach(o => {
+        const kitchenDelay = getDurationText(o.timestamps.order_taken_at, o.timestamps.cooking_started_at);
+        const prepDuration = getDurationText(o.timestamps.cooking_started_at, o.timestamps.ready_at);
+        const totalJourney = o.timestamps.completed_at
+            ? getDurationText(o.timestamps.order_taken_at, o.timestamps.completed_at)
+            : getDurationText(o.timestamps.order_taken_at, Date.now()) + ' so far';
+        const tr = document.createElement('tr');
+        tr.className = 'border-b border-slate-800 cursor-pointer hover:bg-slate-950/60';
+        tr.innerHTML = `
+            <td class="p-3">
+                <span class="font-mono text-purple-400 font-bold">${o.id}</span> <span class="text-slate-600 text-xs">&#9662;</span><br>
+                <span class="text-xs text-slate-400">${escapeHtml(o.table)} | ${escapeHtml(itemsSummaryText(o))}</span>
+            </td>
+            <td class="p-3 text-xs text-slate-200">${escapeHtml(o.waiter)}</td>
+            <td class="p-3 text-xs font-mono text-emerald-300">${formatExactTime(o.timestamps.order_taken_at)}</td>
+            <td class="p-3 text-xs font-mono text-amber-400 font-semibold">${kitchenDelay}</td>
+            <td class="p-3 text-xs font-mono text-cyan-300">${prepDuration}</td>
+            <td class="p-3 text-xs font-mono text-purple-400 font-bold">${totalJourney}</td>
+            <td class="p-3 text-xs">
+                ${statusBadge(o.status)}
+                <div class="text-emerald-400 font-mono font-bold mt-1">₹${orderTotal(o).toFixed(2)}</div>
+            </td>
+        `;
+        auditTable.appendChild(tr);
+
+        const trailRow = document.createElement('tr');
+        trailRow.className = 'hidden bg-slate-950/40 border-b border-slate-800';
+        const trail = o.auditTrail || [];
+        trailRow.innerHTML = `
+            <td colspan="7" class="p-3">
+                <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-1.5">Order history</div>
+                ${trail.length === 0
+                    ? '<div class="text-xs text-slate-600">No history recorded for this order.</div>'
+                    : trail.map(e => `<div class="text-xs text-slate-400 font-mono mb-0.5"><span class="text-slate-500">${formatExactTime(e.time)}</span> — ${escapeHtml(e.message)}</div>`).join('')}
+            </td>
+        `;
+        auditTable.appendChild(trailRow);
+
+        tr.onclick = () => trailRow.classList.toggle('hidden');
+    });
+
+    const waiterNames = [...new Set(todayOrders.map(o => o.waiter))];
+    const wTable = document.getElementById('admin-waiter-table');
+    wTable.innerHTML = waiterNames.length === 0 ? '<p class="text-slate-500 text-xs">No orders yet today.</p>' : '';
+    waiterNames.forEach(name => {
+        const wOrders = todayOrders.filter(o => o.waiter === name);
+        const wRevenue = wOrders.filter(o => o.status === 'Paid').reduce((s, o) => s + orderTotal(o), 0);
+        const row = document.createElement('div');
+        row.className = 'flex justify-between border-b border-slate-800 pb-1';
+        row.innerHTML = `<span class="text-white">${escapeHtml(name)}</span><span>${wOrders.length} orders</span><span class="text-emerald-400">₹${wRevenue.toFixed(2)}</span>`;
+        wTable.appendChild(row);
+    });
+
+    const sessList = document.getElementById('admin-table-sessions');
+    const sessionsToday = tableSessions.filter(s => isToday(s.engagedAt)).sort((a, b) => b.engagedAt - a.engagedAt);
+    sessList.innerHTML = sessionsToday.length === 0 ? '<p class="text-slate-500 text-xs">No tables engaged yet today.</p>' : '';
+    sessionsToday.forEach(s => {
+        const isOpen = !s.freedAt;
+        const duration = getDurationText(s.engagedAt, s.freedAt || Date.now()) + (isOpen ? ' so far' : '');
+        const row = document.createElement('div');
+        row.className = 'flex justify-between items-center bg-slate-950 border border-slate-800 rounded p-2.5 text-xs gap-2 flex-wrap';
+        row.innerHTML = `
+            <div>
+                <span class="font-bold text-white">${escapeHtml(s.table)}</span>
+                <span class="ml-2 px-1.5 py-0.5 rounded text-[10px] font-mono ${isOpen ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-700/50 text-slate-400'}">${isOpen ? 'Engaged' : 'Available'}</span>
+                <div class="text-slate-500 mt-0.5">Waiter: ${escapeHtml(s.waiter)} &middot; Engaged ${formatExactTime(s.engagedAt)}${s.freedAt ? ` &middot; Freed ${formatExactTime(s.freedAt)} by ${escapeHtml(s.freedBy || '—')}` : ''}</div>
+            </div>
+            <span class="text-cyan-300 font-mono">${duration}</span>
+        `;
+        sessList.appendChild(row);
+    });
+
+    const devList = document.getElementById('admin-device-list');
+    const devices = Object.values(deviceRegistry).sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+    devList.innerHTML = devices.length === 0 ? '<p class="text-slate-500 text-xs">No devices registered yet.</p>' : '';
+    devices.forEach(dev => {
+        const isMe = dev.deviceId === identity.deviceId;
+        const lastSeenMs = Date.now() - dev.lastSeenAt;
+        const online = lastSeenMs < 15000;
+        const row = document.createElement('div');
+        row.className = 'flex justify-between items-center bg-slate-950 border border-slate-800 rounded p-2.5 text-xs gap-2 flex-wrap';
+        row.innerHTML = `
+            <div class="flex items-center gap-2 flex-wrap">
+                <span class="w-2 h-2 rounded-full ${online ? 'bg-emerald-500' : 'bg-slate-600'}"></span>
+                ${statusBadge(dev.role[0].toUpperCase() + dev.role.slice(1))}
+                <span class="font-semibold text-white">${escapeHtml(dev.name || '—')}</span>
+                <span class="text-slate-500 font-mono">${isMe ? 'this device' : (online ? 'online' : 'offline')}</span>
+            </div>
+        `;
+        if (!isMe && !dev.revoked) {
+            const btn = document.createElement('button');
+            btn.className = 'border border-rose-700 text-rose-300 hover:bg-rose-900/40 rounded px-2 py-1 text-xs';
+            btn.textContent = 'Reset role';
+            btn.onclick = async () => {
+                if (await customConfirm(`Reset the role on "${dev.name || dev.role}"'s device? They'll be sent back to the role picker.`)) revokeDevice(dev.deviceId);
+            };
+            row.appendChild(btn);
+        } else if (dev.revoked) {
+            const note = document.createElement('span');
+            note.className = 'text-rose-400 font-mono text-xs';
+            note.textContent = 'reset pending…';
+            row.appendChild(note);
+        }
+        devList.appendChild(row);
+    });
+}
+
+function adminCard(label, val, warn) {
+    return `<div class="bg-slate-900 border border-slate-800 ${warn ? 'border-l-4 border-l-rose-500' : ''} rounded-lg p-3">
+        <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">${label}</div>
+        <div class="text-xl font-bold ${warn ? 'text-rose-400' : 'text-white'}">${val}</div>
+    </div>`;
+}
+
+/* ---------------- Boot ---------------- */
+
+// Registers the service worker if the environment supports it. Wrapped
+// defensively so it never blocks the app on unsupported hosts.
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js').catch(() => {});
+    });
+}
+
+(async () => {
+    await getOrCreateDeviceId();
+    await loadIdentity();
+    if (identity && identity.role) {
+        if (!identity.deviceId) { identity.deviceId = deviceId; await saveIdentity(); }
+        await enterApp();
+    }
+})();
+</script>
+</body>
+</html>
